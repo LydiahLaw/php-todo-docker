@@ -1,0 +1,88 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_REGISTRY = "lydiahlaw"
+        IMAGE_NAME = "php-todo"
+        IMAGE_TAG = "${env.BRANCH_NAME.replace('/', '-')}-0.0.1"
+    }
+
+    stages {
+
+        stage('Initial Cleanup') {
+            steps {
+                dir("${WORKSPACE}") {
+                    deleteDir()
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh """
+                    docker build -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} .
+                """
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh """
+                    docker stop test-todo-container && docker rm test-todo-container || true
+                    docker run --name test-todo-container \
+                        --network tooling_app_network \
+                        -e DB_HOST=mysqlserverhost \
+                        -e DB_DATABASE=tododb \
+                        -e DB_USERNAME=webaccess \
+                        -e DB_PASSWORD=Devopslearn# \
+                        -d ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+                    sleep 15
+                    STATUS=\$(docker run --rm --network tooling_app_network curlimages/curl:latest \
+                        curl -s -o /dev/null -w "%{http_code}" http://test-todo-container:80)
+                    echo "HTTP Status: \$STATUS"
+                    echo "\$STATUS" | grep -E "200|302"
+                """
+            }
+            post {
+                always {
+                    sh 'docker stop test-todo-container && docker rm test-todo-container || true'
+                }
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                        docker push ''' + "${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}" + '''
+                    '''
+                }
+            }
+        }
+
+        stage('Cleanup Images') {
+            steps {
+                sh """
+                    docker rmi ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} || true
+                """
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker logout'
+        }
+    }
+}
